@@ -1,0 +1,2 @@
+Terminal line:
+.\.venv\Scripts\pyinstaller.exe --noconsole --name=DYFH --icon=DYFH-icon.ico --add-data=tasks.json:. --hidden-import=customtkinter to_done.py
