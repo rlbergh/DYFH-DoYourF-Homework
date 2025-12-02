@@ -21,6 +21,8 @@ def local_path(*parts) -> str:
     return str(app_base_dir().joinpath(*parts))
 
 SAVE_FILE = local_path("tasks.json")
+ZOOM_LINKS_FILE = local_path("zoom_links.json")
+SETTINGS_FILE = local_path("settings.json")
 
 # ctk theme
 ctk.set_appearance_mode("dark")          # "light", "dark", or "system"
@@ -58,6 +60,20 @@ class ToDoApp(ctk.CTk):
         self.class_var = ctk.StringVar()
         self.group_by_class = ctk.BooleanVar(value=False)
         self.url_var = ctk.StringVar()
+
+        # quick filter
+        self.course_filter: Optional[str] = None
+
+        # tooltip state
+        self._tooltip_window = None
+
+        #settings initialization
+        self.hidden_courses: set[str] = set()
+        self.show_archived = ctk.BooleanVar(value=False)  # UI toggle
+
+        #zoom links
+        self.class_zoom_urls: Dict[str, str] = self._load_zoom_links()
+        self._load_settings()
 
         self._build_ui()
         self._load_tasks()
@@ -116,23 +132,26 @@ class ToDoApp(ctk.CTk):
         controls = ctk.CTkFrame(mid, fg_color="transparent")
         controls.pack(fill="x", padx=10, pady=(10, 6))
 
-        clear_btn = ctk.CTkButton(controls, text="Delete Completed",
-                      fg_color="#cf6523",
-                      hover_color="#bf1704",
-                      text_color="white",
-                      command=self._clear_completed)
-        clear_btn.pack(side="left", padx=(8, 0))
         self.entry.bind("<Return>", lambda e: self._add_or_update())
+
+        # Sort button
+        self.sort_btn = ctk.CTkButton(controls, text="Sort by Due ↑",
+                                      command=self._sort_by_due)
+        self.sort_btn.pack(side="left", padx=(8, 8))
 
         # Group by class button
         ctk.CTkCheckBox(controls, text="Group by class",
                         variable=self.group_by_class,
                         command=self._refresh_list).pack(side="left", padx=(8, 0))
 
-        # Sort button
-        self.sort_btn = ctk.CTkButton(controls, text="Sort by Due ↑",
-                                      command=self._sort_by_due)
-        self.sort_btn.pack(side="left", padx=(8, 8))
+        # Toggle to include archived classes in the view
+        ctk.CTkCheckBox(
+            controls,
+            text="Show archived classes",
+            variable=self.show_archived,
+            command=self._refresh_list
+        ).pack(side="left", padx=(8, 0))
+
 
         # Filter menu
         ctk.CTkOptionMenu(controls,
@@ -143,15 +162,39 @@ class ToDoApp(ctk.CTk):
         ctk.CTkLabel(controls, text="Filter: ").pack(side="right", padx=(0,4))
 
         # --- List (card-style) ---
-        self.cards = ctk.CTkScrollableFrame(mid, corner_radius=12, height=420)
+        self.cards = ctk.CTkScrollableFrame(mid, corner_radius=12)
         self.cards.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
         self._card_rows = []
 
-        # --- Status bar at bottom ---
+        # --- Status bar at bottom with settings gear ---
         self.status = getattr(self, "status", ctk.StringVar(value="Ready"))
-        ctk.CTkLabel(self, textvariable=self.status, anchor="w") \
-            .pack(fill="x", side="bottom", padx=10, pady=(0, 8))
+
+        status_bar = ctk.CTkFrame(self, fg_color="transparent")
+        status_bar.pack(fill="x", side="bottom", padx=10, pady=(0, 8))
+
+        status_label = ctk.CTkLabel(status_bar, textvariable=self.status, anchor="w")
+        status_label.pack(side="left", fill="x", expand=True)
+
+        # Gear button to open settings
+        self.settings_btn = ctk.CTkButton(
+            status_bar,
+            text="⚙",
+            width=32,
+            command=self._open_settings_dialog
+        )
+        self.settings_btn.pack(side="right")
+
+        # Tooltip on the gear
+        self.settings_btn.bind(
+            "<Enter>",
+            lambda e: self._show_tooltip(self.settings_btn, "Open app settings")
+        )
+        self.settings_btn.bind(
+            "<Leave>",
+            lambda e: self._hide_tooltip()
+        )
+
 
     # ---------- Persistence ----------
     def _load_tasks(self):
@@ -189,7 +232,81 @@ class ToDoApp(ctk.CTk):
         values = sorted(courses, key=lambda s: (not s.isdigit(), s))  # numbers first, then alpha
         self.class_combo["values"] = values
 
+    # ---------- Zoom link persistence ----------
+
+    def _load_zoom_links(self) -> Dict[str, str]:
+        """Load per-class Zoom URLs from zoom_links.json."""
+        if not os.path.exists(ZOOM_LINKS_FILE):
+            return {}
+        try:
+            with open(ZOOM_LINKS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            # ensure it's a simple str→str dict
+            if isinstance(data, dict):
+                return {str(k): str(v) for k, v in data.items()}
+        except Exception as e:
+            messagebox.showwarning("Zoom links",
+                                   f"Could not read {ZOOM_LINKS_FILE}.\n{e}")
+        return {}
+
+    def _save_zoom_links(self):
+        """Save per-class Zoom URLs to zoom_links.json."""
+        try:
+            with open(ZOOM_LINKS_FILE, "w", encoding="utf-8") as f:
+                json.dump(self.class_zoom_urls, f, indent=2)
+        except Exception as e:
+            messagebox.showerror("Zoom links",
+                                 f"Could not save to {ZOOM_LINKS_FILE}.\n{e}")
+
+    # ---------- App settings (archived classes) ----------
+
+    def _load_settings(self):
+        if not os.path.exists(SETTINGS_FILE):
+            return
+        try:
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            hidden = data.get("hidden_courses", [])
+            if isinstance(hidden, list):
+                self.hidden_courses = {str(c) for c in hidden}
+        except Exception as e:
+            messagebox.showwarning("Settings",
+                                   f"Could not read {SETTINGS_FILE}.\n{e}")
+
+    def _save_settings(self):
+        data = {
+            "hidden_courses": sorted(self.hidden_courses),
+        }
+        try:
+            with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            messagebox.showerror("Settings",
+                                 f"Could not save to {SETTINGS_FILE}.\n{e}")
+
     # ---------- Helpers ----------
+    def _quick_filter_class(self, course: str):
+        """
+        Toggle a class filter based on KPI badge click.
+        - Clicking a class applies that filter.
+        - Clicking the same class again clears the filter.
+        """
+        # Normalize course key (we use bare codes like '550' or 'Unassigned')
+        course = (course or "Unassigned").strip() or "Unassigned"
+
+        if self.course_filter == course:
+            # toggle off if already selected
+            self.course_filter = None
+            self._set_status("Cleared class filter.")
+        else:
+            self.course_filter = course
+            # it’s handy to show grouped view when filtering by class
+            self.group_by_class.set(True)
+            self._set_status(f"Filtered to {course}.")
+
+        self._refresh_list()
+
+
 
     def _toggle_btn_style(self, running: bool) -> dict:
         """Return CTkButton style kwargs based on running state."""
@@ -211,11 +328,32 @@ class ToDoApp(ctk.CTk):
 
     def _filtered_tasks(self):
         mode = self.filter_mode.get()
+        show_arch = self.show_archived.get()
+
         if mode == "Active":
-            return [t for t in self.tasks if not t.done]
+            base = [t for t in self.tasks if not t.done]
         elif mode == "Completed":
-            return [t for t in self.tasks if t.done]
-        return list(self.tasks)
+            base = [t for t in self.tasks if t.done]
+        else:
+            base = list(self.tasks)
+
+        # hide archived classes unless user explicitly shows them
+        if not show_arch:
+            base = [
+                t for t in base
+                if not t.course or str(t.course).strip() not in self.hidden_courses
+            ]
+
+        # NEW: filter by a specific class when set
+        if self.course_filter:
+            def course_key(t: Task) -> str:
+                return (t.course or "Unassigned").strip() or "Unassigned"
+
+            base = [t for t in base if course_key(t) == self.course_filter]
+
+        return base
+
+
 
     def _refresh_list(self):
         self._refresh_cards()
@@ -235,7 +373,7 @@ class ToDoApp(ctk.CTk):
         if self.group_by_class.get():
             buckets: dict[str, list[Task]] = {}
             for t in current:
-                key = (f"IMT {t.course}" or "Unassigned").strip()
+                key = (f"{t.course}" or "Unassigned").strip()
                 buckets.setdefault(key, []).append(t)
 
             def bucket_key(k: str):  # Unassigned last
@@ -281,12 +419,15 @@ class ToDoApp(ctk.CTk):
         if m: return f"{m}m {s}s"
         return f"{s}s"
 
-    def _course_totals(self) -> dict[str, int]:
-        """Aggregate total seconds by course, including running sessions"""
+    def _course_totals(self, include_archived: bool = False) -> dict[str, int]:
+        """Aggregate total seconds by course, including running sessions."""
         totals: dict[str, int] = {}
         for t in self.tasks:
-            secs = self._task_total_seconds(t)
             key = (t.course or "Unassigned").strip() or "Unassigned"
+            # skip archived unless explicitly included
+            if not include_archived and key in self.hidden_courses:
+                continue
+            secs = self._task_total_seconds(t)
             totals[key] = totals.get(key, 0) + secs
         return totals
 
@@ -304,38 +445,360 @@ class ToDoApp(ctk.CTk):
             w.destroy()
         self._kpi_rows.clear()
 
-        totals = self._course_totals()
+        totals = self._course_totals(include_archived=self.show_archived.get())
         if not totals:
             lbl = ctk.CTkLabel(self._kpi_container, text="No time tracked yet")
-            lbl.pack(side ="left", padx=(0,8))
+            lbl.pack(side="left", padx=(0, 8))
             self._kpi_rows.append(lbl)
             return
 
         title = ctk.CTkLabel(self._kpi_container, text="Time by class",
                              font=("TkDefaultFont", 16, "bold"))
-        title.pack(side ="left", padx=(0,8))
+        title.pack(side="left", padx=(0, 8))
         self._kpi_rows.append(title)
 
-        # sum all times together
         grand_total = 0
         for course in self._sort_course_keys(list(totals.keys())):
             secs = totals[course]
             grand_total += secs
+
+            course_box = ctk.CTkFrame(self._kpi_container, fg_color="transparent")
+            course_box.pack(side="left", padx=(6, 0))
+            self._kpi_rows.append(course_box)
+
             badge = self._make_big_badge(
-                self._kpi_container,
+                course_box,
                 f"{course}: {self._fmt_seconds(secs)}",
                 tone="highlight"
             )
+            badge.pack(side="top", pady=(0, 2))
 
-            badge.bind("<Button-1>", lambda _e, c=course: self._quick_filter_class(c))
-            badge.pack(side="left", padx=(6, 0))
-            self._kpi_rows.append(badge)
+            has_zoom = (course != "Unassigned" and course in self.class_zoom_urls)
+
+            # click = Zoom if link exists, else filter
+            badge.bind(
+                "<Button-1>",
+                lambda _e, c=course: self._on_kpi_badge_click(c)
+            )
+
+            # hover: hand cursor + tooltip
+            def on_enter(e, lbl=badge, c=course, hz=has_zoom):
+                lbl.configure(cursor="hand2")
+                tip_text = "Join Zoom" if hz else "Filter tasks"
+                self._show_tooltip(lbl, tip_text)
+
+            def on_leave(e, lbl=badge):
+                lbl.configure(cursor="")
+                self._hide_tooltip()
+
+            badge.bind("<Enter>", on_enter)
+            badge.bind("<Leave>", on_leave)
 
         total_badge = self._make_big_badge(
-            self._kpi_container, f"Σ {self._fmt_seconds(grand_total)}", tone="neutral"
+            self._kpi_container,
+            f"Σ {self._fmt_seconds(grand_total)}",
+            tone="neutral"
         )
         total_badge.pack(side="right", padx=(10, 0))
         self._kpi_rows.append(total_badge)
+
+    #zoom link logic
+    def _open_zoom_links_dialog(self):
+        """Small dialog to add/edit per-class Zoom links."""
+        win = ctk.CTkToplevel(self)
+        win.title("Zoom links")
+        win.geometry("420x180")
+        win.resizable(False, False)
+        win.grab_set()  # modal-ish
+
+        # Collect known class codes from tasks and from existing zoom links
+        courses = set(k for k in self.class_zoom_urls.keys())
+        for t in self.tasks:
+            if t.course:
+                courses.add(str(t.course).strip())
+        if "Unassigned" in courses:
+            courses.remove("Unassigned")
+        course_values = sorted(courses, key=lambda s: (not s.isdigit(), s))
+
+        class_var = ctk.StringVar()
+        url_var = ctk.StringVar()
+
+        def load_url_for_class(*_):
+            c = class_var.get().strip()
+            url_var.set(self.class_zoom_urls.get(c, ""))
+
+        # Row 1: class code
+        row1 = ctk.CTkFrame(win, fg_color="transparent")
+        row1.pack(fill="x", padx=16, pady=(16, 6))
+
+        c_label = ctk.CTkLabel(row1, text="Class code (e.g., 550):")
+        c_label.pack(side="left", padx=(0, 8))
+
+        class_combo = ctk.CTkComboBox(row1,
+                                      width=120,
+                                      variable=class_var,
+                                      values=course_values,
+                                      command=lambda _v: load_url_for_class())
+        class_combo.pack(side="left", fill="x", expand=True)
+
+        # allow free typing
+        class_combo.configure(state="normal")
+
+        # Row 2: URL
+        row2 = ctk.CTkFrame(win, fg_color="transparent")
+        row2.pack(fill="x", padx=16, pady=(6, 6))
+
+        u_label = ctk.CTkLabel(row2, text="Zoom URL:")
+        u_label.pack(side="left", padx=(0, 8))
+
+        url_entry = ctk.CTkEntry(row2, textvariable=url_var)
+        url_entry.pack(side="left", fill="x", expand=True)
+
+        # Row 3: buttons
+        row3 = ctk.CTkFrame(win, fg_color="transparent")
+        row3.pack(fill="x", padx=16, pady=(10, 10))
+
+        def save_and_close():
+            c = class_var.get().strip()
+            u = url_var.get().strip()
+            if not c:
+                messagebox.showinfo("Zoom links", "Enter a class code, e.g., 550.")
+                return
+            if not u:
+                # allow clearing link entirely
+                if c in self.class_zoom_urls:
+                    del self.class_zoom_urls[c]
+                self._save_zoom_links()
+                self._update_kpi()
+                win.destroy()
+                return
+
+            self.class_zoom_urls[c] = u
+            self._save_zoom_links()
+            self._update_kpi()
+            win.destroy()
+
+        def delete_link():
+            c = class_var.get().strip()
+            if not c or c not in self.class_zoom_urls:
+                return
+            if messagebox.askyesno("Zoom links",
+                                   f"Remove Zoom link for {c}?"):
+                del self.class_zoom_urls[c]
+                self._save_zoom_links()
+                self._update_kpi()
+                url_var.set("")
+
+        save_btn = ctk.CTkButton(row3, text="Save", command=save_and_close)
+        save_btn.pack(side="right", padx=(8, 0))
+
+        del_btn = ctk.CTkButton(row3, text="Delete link", fg_color="#a6171c",
+                                hover_color="#6b1013", command=delete_link)
+        del_btn.pack(side="left")
+
+        # focus niceties
+        class_combo.focus_set()
+
+    def _open_class_archive_dialog(self):
+        """Dialog to mark classes as active/archived (hidden)."""
+        win = ctk.CTkToplevel(self)
+        win.title("Manage classes")
+        win.geometry("400x420")  # a bit taller so buttons don't get cut off
+        win.resizable(False, True)
+        win.grab_set()
+
+        # ---- Main container ----
+        main = ctk.CTkFrame(win, corner_radius=10)
+        main.pack(fill="both", expand=True, padx=10, pady=12)
+
+        info = ctk.CTkLabel(
+            main,
+            text="Uncheck a class to archive it.\n\n"
+                 "Archived classes are hidden from the task list and KPIs\n"
+                 "unless 'Show archived classes' is enabled.",
+            justify="left"
+        )
+        info.pack(anchor="w", padx=16, pady=(10, 8))
+
+        # ---- Class list ----
+        list_frame = ctk.CTkScrollableFrame(main, corner_radius=8)
+        list_frame.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+
+        # collect all seen course codes from tasks
+        courses = set()
+        for t in self.tasks:
+            if t.course:
+                courses.add(str(t.course).strip())
+        if "Unassigned" in courses:
+            courses.remove("Unassigned")
+
+        course_values = sorted(courses, key=lambda s: (not s.isdigit(), s))
+
+        check_vars: Dict[str, ctk.BooleanVar] = {}
+
+        for c in course_values:
+            var = ctk.BooleanVar(value=(c not in self.hidden_courses))
+            chk = ctk.CTkCheckBox(list_frame, text=f"{c}", variable=var)
+            chk.pack(anchor="w", pady=2, padx=8)
+            check_vars[c] = var
+
+        # ---- Buttons ----
+        btn_row = ctk.CTkFrame(main, fg_color="transparent")
+        btn_row.pack(fill="x", padx=12, pady=(10, 10))
+
+        def save_and_close():
+            # visible = checked; hidden = unchecked
+            self.hidden_courses.clear()
+            for c, var in check_vars.items():
+                if not var.get():
+                    self.hidden_courses.add(c)
+
+            # persist + refresh UI
+            self._save_settings()
+            self._refresh_list()
+            self._update_kpi()
+            win.destroy()
+
+        def cancel():
+            win.destroy()
+
+        cancel_btn = ctk.CTkButton(btn_row,
+                                   text="Cancel",
+                                   command=cancel,
+                                   fg_color="#daf2ec",
+                                   text_color="#171717",
+                                   hover_color="#a5e8d7")
+        cancel_btn.pack(side="right", padx=(8, 0))
+
+        save_btn = ctk.CTkButton(btn_row, text="Save", command=save_and_close)
+        save_btn.pack(side="left")
+
+        win.focus_set()
+
+    # open settings dialog
+    def _open_settings_dialog(self):
+        """Main app settings: zoom links, class archiving, delete completed."""
+        win = ctk.CTkToplevel(self)
+        win.title("Settings")
+        win.geometry("520x420")
+        win.resizable(False, False)
+        win.grab_set()
+
+        # ----- Zoom section -----
+        zoom_frame = ctk.CTkFrame(win, corner_radius=10)
+        zoom_frame.pack(fill="x", padx=16, pady=(16, 8))
+
+        ctk.CTkLabel(
+            zoom_frame,
+            text="Zoom links",
+            font=ctk.CTkFont(size=14, weight="bold")
+        ).pack(anchor="w", padx=12, pady=(8, 2))
+
+        ctk.CTkLabel(
+            zoom_frame,
+            text="Add or edit Zoom links for your classes.\n"
+                 "KPI badges with links behave as “Join Zoom” buttons.",
+            justify="left"
+        ).pack(anchor="w", padx=12, pady=(0, 8))
+
+        ctk.CTkButton(
+            zoom_frame,
+            text="Edit class Zoom links…",
+            command=self._open_zoom_links_dialog
+        ).pack(anchor="w", padx=12, pady=(0, 10))
+
+        # ----- Class archiving section -----
+        arch_frame = ctk.CTkFrame(win, corner_radius=10)
+        arch_frame.pack(fill="x", padx=16, pady=(8, 8))
+
+        ctk.CTkLabel(
+            arch_frame,
+            text="Classes & archiving",
+            font=ctk.CTkFont(size=14, weight="bold")
+        ).pack(anchor="w", padx=12, pady=(8, 2))
+
+        ctk.CTkLabel(
+            arch_frame,
+            text="Archive old classes to hide them from the task list and KPIs.\n"
+                 "Use the 'Show archived classes' checkbox in the main view to peek at them.",
+            justify="left"
+        ).pack(anchor="w", padx=12, pady=(0, 8))
+
+        ctk.CTkButton(
+            arch_frame,
+            text="Manage archived classes…",
+            command=self._open_class_archive_dialog
+        ).pack(anchor="w", padx=12, pady=(0, 10))
+
+        # ----- Danger zone -----
+        danger = ctk.CTkFrame(win, corner_radius=10)
+        danger.pack(fill="x", padx=16, pady=(8, 16))
+
+        ctk.CTkLabel(
+            danger,
+            text="Danger zone",
+            font=ctk.CTkFont(size=14, weight="bold")
+        ).pack(anchor="w", padx=12, pady=(8, 2))
+
+        ctk.CTkLabel(
+            danger,
+            text="Delete all completed tasks. This cannot be undone.",
+            justify="left"
+        ).pack(anchor="w", padx=12, pady=(0, 8))
+
+        ctk.CTkButton(
+            danger,
+            text="Delete completed tasks…",
+            fg_color="#cf6523",
+            hover_color="#bf1704",
+            text_color="white",
+            command=self._clear_completed
+        ).pack(anchor="w", padx=12, pady=(0, 10))
+
+    def _open_course_zoom(self, course: str):
+        """Open the Zoom link for a given course code (e.g., '550')."""
+        url = self.class_zoom_urls.get(course)
+        if not url:
+            self._set_status(f"No Zoom link configured for {course}.")
+            return
+
+        target = self._normalize_url_or_path(url)
+        if not target:
+            self._set_status("Invalid Zoom link.")
+            return
+
+        try:
+            if os.path.exists(target):
+                if platform.system() == "Windows":
+                    os.startfile(target)  # type: ignore[attr-defined]
+                elif platform.system() == "Darwin":
+                    os.system(f'open "{target}"')
+                else:
+                    os.system(f'xdg-open "{target}"')
+            else:
+                webbrowser.open(target)
+            self._set_status(f"Opening Zoom for {course}")
+        except Exception as e:
+            messagebox.showerror("Open Zoom link",
+                                 f"Could not open link:\n{target}\n\n{e}")
+
+    # kpi badge click
+
+    def _on_kpi_badge_click(self, course: str):
+        """
+        When a KPI badge is clicked:
+        - If we have a Zoom URL for this course, open it.
+        - Otherwise, fall back to quick-filtering that class.
+        """
+        if course != "Unassigned" and course in self.class_zoom_urls:
+            self._open_course_zoom(course)
+        else:
+            # assumes you already have _quick_filter_class defined
+            try:
+                self._quick_filter_class(course)
+            except AttributeError:
+                # graceful fallback if that method doesn't exist
+                self._set_status(f"Clicked: {course}")
 
     # --- Card design ---
     def _make_task_card(self, parent, task: Task):
@@ -399,7 +862,7 @@ class ToDoApp(ctk.CTk):
 
         # class badge
         if task.course:
-            self._make_badge(meta, f"IMT {task.course}", tone="info").pack(side="left")
+            self._make_badge(meta, f"{task.course}", tone="info").pack(side="left")
 
         # time badge (total including running)
         total_secs = self._task_total_seconds(task)
@@ -414,8 +877,15 @@ class ToDoApp(ctk.CTk):
                       command=lambda tid=task.id: self._start_edit_by_id(tid)))
         edit_btn.pack(side="left", padx=(0, 6))
 
-        trash_btn = (ctk.CTkButton(right, text="🗑", width=36,
-                      command=lambda tid=task.id: self._delete_by_id(tid)))
+        trash_btn = ctk.CTkButton(
+            right,
+            text="🗑",
+            width=36,
+            fg_color="#cf6523",  # same family as Delete Completed
+            hover_color="#bf1704",
+            text_color="white",
+            command=lambda tid=task.id: self._delete_by_id(tid)
+        )
         trash_btn.pack(side="left", padx=(0, 6))
 
         is_running = bool(task.running_start)
@@ -430,7 +900,13 @@ class ToDoApp(ctk.CTk):
         )
         toggle_btn.pack(side="left", padx=(0, 6))
 
-        reset_btn = (ctk.CTkButton(right, text="⟲", width=36, fg_color="#a6171c", hover_color="#6b1013",
+        reset_btn = (ctk.CTkButton(right,
+                                   text="⟲",
+                                   width=36,
+                                   fg_color="#2e2929",
+                                   hover_color="#781a1a",
+                                   border_color="#e0c5c5",
+                                   border_width=1,
                       command=lambda tid=task.id: self._reset_time_by_id(tid)))
         reset_btn.pack(side="left")
 
@@ -527,6 +1003,52 @@ class ToDoApp(ctk.CTk):
     def _set_status(self, text: str):
         self.status.set(text)
 
+    # ---------- Tooltip helpers ----------
+
+    def _show_tooltip(self, widget, text: str):
+        """Show a small tooltip near the given widget."""
+        # Clear any existing tooltip
+        self._hide_tooltip()
+        if not text:
+            return
+
+        # Create a borderless top-level window
+        tw = ctk.CTkToplevel(self)
+        tw.overrideredirect(True)   # no title bar
+        tw.attributes("-topmost", True)
+
+        # Position: just above the widget, slight offset
+        try:
+            x = widget.winfo_rootx() + widget.winfo_width() // 2
+            y = widget.winfo_rooty() - 25
+        except Exception:
+            x, y = 0, 0
+
+        tw.geometry(f"+{x}+{y}")
+
+        label = ctk.CTkLabel(
+            tw,
+            text=text,
+            corner_radius=6,
+            fg_color=("gray90", "gray20"),
+            text_color=("black", "white"),
+            padx=8,
+            pady=4,
+        )
+        label.pack()
+
+        self._tooltip_window = tw
+
+    def _hide_tooltip(self):
+        """Hide any active tooltip."""
+        if self._tooltip_window is not None:
+            try:
+                self._tooltip_window.destroy()
+            except Exception:
+                pass
+            self._tooltip_window = None
+
+
     # ---------- Actions ----------
     def _add_or_update(self):
         text = self.entry.get().strip()
@@ -551,7 +1073,7 @@ class ToDoApp(ctk.CTk):
                 self._refresh_list()
                 self._set_status("Updated task.")
             self.editing_task_id = None
-            self.add_btn.config(text="Add")
+            self.add_btn.configure(text="Add")
         else:
             # Create new
             self.tasks.append(Task(id=str(uuid.uuid4()), text=text, due=due, course=course, url=url))
@@ -666,7 +1188,7 @@ class ToDoApp(ctk.CTk):
         self.due_var.set(t.due or "")
         self.class_var.set(t.course or "")
         self.editing_task_id = t.id
-        self.add_btn.config(text="Update")
+        self.add_btn.configure(text="Update")
         self.entry.focus();
         self.entry.icursor("end")
         self._set_status("Editing… press Enter to save.")
@@ -688,7 +1210,7 @@ class ToDoApp(ctk.CTk):
             self.tasks = [x for x in self.tasks if x.id != t.id]
             if self.editing_task_id == t.id:
                 self.editing_task_id = None
-                self.add_btn.config(text="Add")
+                self.add_btn.configure(text="Add")
                 self.entry.delete(0, "end");
                 self.due_var.set("")
             self._save_tasks()
@@ -767,7 +1289,7 @@ class ToDoApp(ctk.CTk):
 
         # Toggle for next click + update button label
         self.sort_asc = not self.sort_asc
-        self.sort_btn.config(text=f"Sort by Due {'↑' if self.sort_asc else '↓'}")
+        self.sort_btn.configure(text=f"Sort by Due {'↑' if self.sort_asc else '↓'}")
         self._set_status(f"Sorted by due date ({'ascending' if self.sort_asc else 'descending'} next).")
 
 if __name__ == "__main__":
