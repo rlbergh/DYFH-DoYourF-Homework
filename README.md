@@ -44,6 +44,7 @@ If you’d like to support ongoing updates, feature expansions, and other privac
 - Manage Zoom links
 - Archive / unarchive classes
 - Delete completed tasks
+- SFW/Safe language mode removes explicit language in app title
 
 ### 💾 100% Local Storage
 
