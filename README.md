@@ -5,8 +5,8 @@ DYFH is a lightweight desktop app for managing coursework, tracking study time, 
 
 The app is written in Python + CustomTkinter, includes dark-mode analytics, and can be compiled into a standalone Windows .exe with PyInstaller.
 There are two options for using it:
-1. [Run it with Python each time]("#-running-dyfh-from-source-files")
-2. [Build a .exe file]("#-build-the-windows-exe-file")
+1. [Run it with Python each time](#-running-dyfh-from-source-files)
+2. [Build a .exe file](#-build-the-windows-exe-file)
 
 ## ✨ Features
 ### 📝 Task Management
