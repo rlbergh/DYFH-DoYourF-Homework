@@ -10,3 +10,7 @@
   - Moved the "Delete completed" button to the settings dialog box to avoid inadvertant clicking
   - Added tooltips to KPIs (they quick filter to class if a Zoom link is not provided)
   - Removed "IMT" from the course name by default. It's now whatever is typed into/selected from the Class field dropdown box
+
+## 12/2/2025
+  - Added Safe Language Mode button in settings dialog box
+  - Framed out analytics dialog box with charts (inaccessible right now)
