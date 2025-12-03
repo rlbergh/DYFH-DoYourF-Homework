@@ -14,3 +14,4 @@
 ## 12/2/2025
   - Added Safe Language Mode button in settings dialog box
   - Framed out analytics dialog box with charts (inaccessible right now)
+  - Bug: Fixed the preset combo box selection for course number
