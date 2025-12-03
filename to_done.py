@@ -12,6 +12,12 @@ from pathlib import Path
 import webbrowser
 from urllib.parse import urlparse
 import platform
+import matplotlib
+matplotlib.use("Agg")  # safe default backend
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from collections import defaultdict
+
 
 def app_base_dir() -> Path:
     #packaging
@@ -44,12 +50,25 @@ class ToDoApp(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        # Use CTkFont, not tkinter.font.Font
+        # ---- settings-related attrs first ----
+        # defaults (may be overwritten by _load_settings)
+        self.safe_mode: bool = False
+        self.hidden_courses: set[str] = set()
+        self.show_archived = ctk.BooleanVar(value=False)  # UI toggle
+
+        # zoom links + settings (may update safe_mode / hidden_courses)
+        self.class_zoom_urls: Dict[str, str] = self._load_zoom_links()
+        self._load_settings()
+
+        # ---- fonts ----
         base_size = ctk.CTkFont().cget("size")  # keeps platform default
         self.font_normal = ctk.CTkFont(size=base_size)
         self.font_done = ctk.CTkFont(size=base_size, overstrike=True)
 
-        self.title("Do your fucking homework")
+        # ---- window title based on safe mode ----
+        title = "Do Your Homework" if self.safe_mode else "Do your fucking homework"
+        self.title(title)
+
         self.geometry("900x520")
         self.minsize(900, 520)
 
@@ -66,14 +85,6 @@ class ToDoApp(ctk.CTk):
 
         # tooltip state
         self._tooltip_window = None
-
-        #settings initialization
-        self.hidden_courses: set[str] = set()
-        self.show_archived = ctk.BooleanVar(value=False)  # UI toggle
-
-        #zoom links
-        self.class_zoom_urls: Dict[str, str] = self._load_zoom_links()
-        self._load_settings()
 
         self._build_ui()
         self._load_tasks()
@@ -102,7 +113,7 @@ class ToDoApp(ctk.CTk):
         self.class_combo = ctk.CTkComboBox(top,
                                            width=100,
                                            variable=self.class_var,
-                                           values=("585", "550")) #replace with your class numbers
+                                           values=(None)) # ATTENTION FIX THIS
         self.class_combo.pack(side="left", padx=(0, 6), pady=10)
 
         #url entry
@@ -176,16 +187,19 @@ class ToDoApp(ctk.CTk):
         status_label = ctk.CTkLabel(status_bar, textvariable=self.status, anchor="w")
         status_label.pack(side="left", fill="x", expand=True)
 
+        icon_font = ctk.CTkFont(size=17)  # experiment: 14–18
+
         # Gear button to open settings
         self.settings_btn = ctk.CTkButton(
             status_bar,
             text="⚙",
             width=32,
+            height=32,
+            font=icon_font,
             command=self._open_settings_dialog
         )
         self.settings_btn.pack(side="right")
 
-        # Tooltip on the gear
         self.settings_btn.bind(
             "<Enter>",
             lambda e: self._show_tooltip(self.settings_btn, "Open app settings")
@@ -267,6 +281,7 @@ class ToDoApp(ctk.CTk):
             with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             hidden = data.get("hidden_courses", [])
+            self.safe_mode = data.get("safe_mode", False)
             if isinstance(hidden, list):
                 self.hidden_courses = {str(c) for c in hidden}
         except Exception as e:
@@ -276,6 +291,7 @@ class ToDoApp(ctk.CTk):
     def _save_settings(self):
         data = {
             "hidden_courses": sorted(self.hidden_courses),
+            "safe_mode": self.safe_mode,
         }
         try:
             with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
@@ -285,6 +301,33 @@ class ToDoApp(ctk.CTk):
                                  f"Could not save to {SETTINGS_FILE}.\n{e}")
 
     # ---------- Helpers ----------
+
+    def _iter_sessions(self, selected_courses: set[str], include_archived: bool = False):
+        """
+        Yield (task, course_key, start_datetime, seconds) for sessions
+        matching selected courses and archive visibility.
+        """
+        for t in self.tasks:
+            course = (t.course or "Unassigned").strip() or "Unassigned"
+
+            # respect archive settings
+            if not include_archived and course in self.hidden_courses:
+                continue
+
+            # respect selected course filter (analytics-level)
+            if selected_courses and course not in selected_courses:
+                continue
+
+            for s in t.sessions:
+                secs = s.get("seconds", 0)
+                if secs <= 0:
+                    continue
+                try:
+                    start = datetime.fromisoformat(s["start"])
+                except Exception:
+                    continue
+                yield t, course, start, secs
+
     def _quick_filter_class(self, course: str):
         """
         Toggle a class filter based on KPI badge click.
@@ -680,7 +723,7 @@ class ToDoApp(ctk.CTk):
         """Main app settings: zoom links, class archiving, delete completed."""
         win = ctk.CTkToplevel(self)
         win.title("Settings")
-        win.geometry("520x420")
+        win.geometry("520x520")
         win.resizable(False, False)
         win.grab_set()
 
@@ -730,6 +773,26 @@ class ToDoApp(ctk.CTk):
             command=self._open_class_archive_dialog
         ).pack(anchor="w", padx=12, pady=(0, 10))
 
+        # ----- Safe language section -----
+        safe_var = ctk.BooleanVar(value=self.safe_mode)
+
+        settings_frame = ctk.CTkFrame(win, corner_radius=10, height=80)
+        settings_frame.pack(fill="x", padx=16, pady=(8, 8))
+        settings_frame.pack_propagate(False)  # keep the frame height, don't shrink
+
+        ctk.CTkLabel(
+            settings_frame,
+            text="Language & tone",
+            font=ctk.CTkFont(size=14, weight="bold")
+        ).pack(anchor="w", padx=12, pady=(8, 2))
+
+        ctk.CTkCheckBox(
+            settings_frame,
+            text="Safe Language Mode",
+            variable=safe_var,
+            command=lambda: self._toggle_safe_mode(safe_var.get())
+        ).pack(anchor="w", padx=12, pady=(0, 8))
+
         # ----- Danger zone -----
         danger = ctk.CTkFrame(win, corner_radius=10)
         danger.pack(fill="x", padx=16, pady=(8, 16))
@@ -754,6 +817,12 @@ class ToDoApp(ctk.CTk):
             text_color="white",
             command=self._clear_completed
         ).pack(anchor="w", padx=12, pady=(0, 10))
+
+    def _toggle_safe_mode(self, val: bool):
+        self.safe_mode = val
+        self._save_settings()
+        new_title = "Do Your Homework" if val else "Do your fucking homework"
+        self.title(new_title)
 
     def _open_course_zoom(self, course: str):
         """Open the Zoom link for a given course code (e.g., '550')."""
@@ -799,6 +868,237 @@ class ToDoApp(ctk.CTk):
             except AttributeError:
                 # graceful fallback if that method doesn't exist
                 self._set_status(f"Clicked: {course}")
+
+    # Analytics aggregations
+    def _analytics_time_by_day(self, selected_courses: set[str]) -> list[tuple[_dt.date, float]]:
+        """Return list of (date, cumulative_hours) sorted by date."""
+        per_day = defaultdict(int)  # date -> seconds
+
+        for _t, _course, start, secs in self._iter_sessions(selected_courses, include_archived=True):
+            d = start.date()
+            per_day[d] += secs
+
+        if not per_day:
+            return []
+
+        days = sorted(per_day.keys())
+        data = []
+        cum_secs = 0
+        for d in days:
+            cum_secs += per_day[d]
+            data.append((d, cum_secs / 3600.0))  # hours
+
+        return data
+
+    def _analytics_top_tasks(self, selected_courses: set[str], limit: int = 10) -> list[tuple[str, float]]:
+        """Return list of (task_title, minutes) for top tasks by time."""
+        per_task = defaultdict(int)  # task_id -> seconds
+        titles: dict[str, str] = {}
+
+        for t in self.tasks:
+            course = (t.course or "Unassigned").strip() or "Unassigned"
+            if selected_courses and course not in selected_courses:
+                continue
+            secs = self._task_total_seconds(t)
+            if secs <= 0:
+                continue
+            per_task[t.id] += secs
+            titles[t.id] = t.text or "(no title)"
+
+        top = sorted(per_task.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+        return [(titles[tid], secs / 60.0) for tid, secs in top]  # minutes
+
+    def _analytics_time_by_weekday(self, selected_courses: set[str]) -> list[tuple[str, float]]:
+        """Return [('Mon', hours), ...] in order Mon..Sun."""
+        per_wd = defaultdict(int)  # weekday_idx -> seconds
+
+        for _t, _course, start, secs in self._iter_sessions(selected_courses, include_archived=True):
+            wd = start.weekday()  # 0=Mon
+            per_wd[wd] += secs
+
+        labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        result = []
+        for i, lbl in enumerate(labels):
+            result.append((lbl, per_wd[i] / 3600.0))
+        return result
+
+    def _open_analytics_dialog(self):
+        win = ctk.CTkToplevel(self)
+        win.title("Analytics")
+        win.geometry("900x600")
+        win.grab_set()
+
+        # --- layout: left = class filters, right = chart + controls ---
+        container = ctk.CTkFrame(win)
+        container.pack(fill="both", expand=True, padx=10, pady=10)
+
+        left = ctk.CTkFrame(container, corner_radius=10)
+        left.pack(side="left", fill="y", padx=(0, 10))
+
+        right = ctk.CTkFrame(container, corner_radius=10)
+        right.pack(side="left", fill="both", expand=True)
+
+        # ----- Left: class checkboxes -----
+        ctk.CTkLabel(
+            left,
+            text="Classes",
+            font=ctk.CTkFont(size=14, weight="bold")
+        ).pack(anchor="w", padx=10, pady=(10, 4))
+
+        courses = set()
+        for t in self.tasks:
+            if t.course:
+                courses.add((t.course or "").strip())
+        if "Unassigned" in courses:
+            courses.remove("Unassigned")
+
+        course_values = sorted(courses, key=lambda s: (not s.isdigit(), s))
+        self._analytics_course_vars: dict[str, ctk.BooleanVar] = {}
+
+        course_list = ctk.CTkScrollableFrame(left, height=300)
+        course_list.pack(fill="y", expand=True, padx=8, pady=(0, 10))
+
+        for c in course_values:
+            var = ctk.BooleanVar(value=True)  # default: show all
+            chk = ctk.CTkCheckBox(course_list, text=f"{c}", variable=var,
+                                  command=lambda: self._analytics_refresh_chart())
+            chk.pack(anchor="w", pady=2)
+            self._analytics_course_vars[c] = var
+
+        # ----- Right: chart type toggle + matplotlib canvas -----
+        header = ctk.CTkFrame(right, fg_color="transparent")
+        header.pack(fill="x", padx=10, pady=(10, 0))
+
+        ctk.CTkLabel(
+            header,
+            text="Charts",
+            font=ctk.CTkFont(size=14, weight="bold")
+        ).pack(side="left")
+
+        self._analytics_chart_type = ctk.StringVar(value="Cumulative time")
+        chart_toggle = ctk.CTkSegmentedButton(
+            header,
+            values=["Cumulative time", "Time by task", "By weekday"],
+            variable=self._analytics_chart_type,
+            command=lambda _v: self._analytics_refresh_chart()
+        )
+        chart_toggle.pack(side="right", padx=10)
+
+        # Matplotlib Figure + Canvas
+        self._analytics_fig = Figure(figsize=(5, 4), dpi=70)
+        self._analytics_ax = self._analytics_fig.add_subplot(111)
+
+        # 🔹 Dark background for figure + axes
+        bg = "#1e1e1e"
+        fg = "#f5f5f5"
+        self._analytics_fig.patch.set_facecolor(bg)
+        self._analytics_ax.set_facecolor(bg)
+        self._analytics_ax.tick_params(colors=fg)
+        self._analytics_ax.spines["bottom"].set_color(fg)
+        self._analytics_ax.spines["top"].set_color(fg)
+        self._analytics_ax.spines["left"].set_color(fg)
+        self._analytics_ax.spines["right"].set_color(fg)
+        self._analytics_ax.yaxis.label.set_color(fg)
+        self._analytics_ax.xaxis.label.set_color(fg)
+        self._analytics_ax.title.set_color(fg)
+
+        self._analytics_canvas = FigureCanvasTkAgg(self._analytics_fig, master=right)
+        self._analytics_canvas.get_tk_widget().pack(fill="both", expand=True, padx=10, pady=10)
+
+        # Kick off first render *after* window is laid out
+        def _initial_draw():
+            try: win.update_idletasks()
+            except Exception:
+                pass
+            self._analytics_refresh_chart()
+
+        win.after(50, _initial_draw)
+
+    def _analytics_selected_courses(self) -> set[str]:
+        """Return set of course codes selected in analytics (e.g., {'550', '585'})."""
+        selected = set()
+        if not hasattr(self, "_analytics_course_vars"):
+            return selected
+        for c, var in self._analytics_course_vars.items():
+            if var.get():
+                selected.add(c)
+        return selected
+
+    def _analytics_refresh_chart(self):
+        if not hasattr(self, "_analytics_fig"):
+            return
+
+        # Ensure canvas/layout is up to date before sizing the figure
+        try:
+            widget = self._analytics_canvas.get_tk_widget()
+            widget.update_idletasks()
+            width = max(widget.winfo_width(), 100)
+            height = max(widget.winfo_height(), 100)
+
+            # Match figure size (in inches) to the current canvas size
+            dpi = self._analytics_fig.dpi or 100
+            self._analytics_fig.set_size_inches(width / dpi, height / dpi, forward=True)
+        except Exception:
+            pass
+
+        selected_courses = self._analytics_selected_courses()
+        chart_type = getattr(self, "_analytics_chart_type", None)
+        chart_type = chart_type.get() if chart_type is not None else "Cumulative time"
+
+        self._analytics_ax.clear()
+
+        # Re-apply dark theme styling on each redraw
+        bg = "#1e1e1e"
+        fg = "#f5f5f5"
+        self._analytics_fig.patch.set_facecolor(bg)
+        self._analytics_ax.set_facecolor(bg)
+        self._analytics_ax.tick_params(colors=fg)
+        for spine in self._analytics_ax.spines.values():
+            spine.set_color(fg)
+        self._analytics_ax.yaxis.label.set_color(fg)
+        self._analytics_ax.xaxis.label.set_color(fg)
+        self._analytics_ax.title.set_color(fg)
+
+
+        if chart_type == "Cumulative time":
+            data = self._analytics_time_by_day(selected_courses)
+            if not data:
+                self._analytics_ax.text(0.5, 0.5, "No data", ha="center", va="center")
+            else:
+                dates = [d for d, _h in data]
+                hours = [h for _d, h in data]
+                self._analytics_ax.plot(dates, hours)
+                self._analytics_ax.set_title("Cumulative time by day")
+                self._analytics_ax.set_ylabel("Hours")
+                self._analytics_ax.set_xlabel("Date")
+        elif chart_type == "Time by task":
+            data = self._analytics_top_tasks(selected_courses)
+            if not data:
+                self._analytics_ax.text(0.5, 0.5, "No data", ha="center", va="center")
+            else:
+                labels = [t for t, _m in data]
+                minutes = [m for _t, m in data]
+                y_pos = range(len(labels))
+                self._analytics_ax.barh(y_pos, minutes)
+                self._analytics_ax.set_yticks(y_pos)
+                self._analytics_ax.set_yticklabels(labels)
+                self._analytics_ax.invert_yaxis()
+                self._analytics_ax.set_title("Top tasks by time")
+                self._analytics_ax.set_xlabel("Minutes")
+        else:  # weekday
+            data = self._analytics_time_by_weekday(selected_courses)
+            labels = [lbl for lbl, _h in data]
+            hours = [h for _lbl, h in data]
+            x_pos = range(len(labels))
+            self._analytics_ax.bar(x_pos, hours)
+            self._analytics_ax.set_xticks(x_pos)
+            self._analytics_ax.set_xticklabels(labels)
+            self._analytics_ax.set_title("Time by weekday")
+            self._analytics_ax.set_ylabel("Hours")
+
+        self._analytics_fig.tight_layout()
+        self._analytics_canvas.draw()
+
 
     # --- Card design ---
     def _make_task_card(self, parent, task: Task):
