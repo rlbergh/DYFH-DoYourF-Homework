@@ -8,6 +8,11 @@ There are two options for using it:
 1. [Run it with Python each time](#-running-dyfh-from-source-files)
 2. [Build a .exe file](#-build-the-windows-exe-file)
 
+## ❤️ Support & Updates
+DYFH is developed and maintained by Rebecca Bergh.
+If you’d like to support ongoing updates, feature expansions, and other privacy-first apps, join the Patreon: https://www.patreon.com/cw/RBGDesigns
+
+👉 your Patreon link here
 ## ✨ Features
 ### 📝 Task Management
 - Add, edit, and delete tasks
