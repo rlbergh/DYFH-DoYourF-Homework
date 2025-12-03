@@ -113,7 +113,8 @@ class ToDoApp(ctk.CTk):
         self.class_combo = ctk.CTkComboBox(top,
                                            width=100,
                                            variable=self.class_var,
-                                           values=(None)) # ATTENTION FIX THIS
+                                           values=[""],
+                                           state="normal")
         self.class_combo.pack(side="left", padx=(0, 6), pady=10)
 
         #url entry
@@ -221,10 +222,11 @@ class ToDoApp(ctk.CTk):
             except Exception as e:
                 messagebox.showwarning("Load error", f"Could not read {SAVE_FILE}.\n{e}")
                 self.tasks = []
-                self._update_course_values()
+
         else:
             self.tasks = []
-            self._update_course_values()
+
+        self._update_course_values()
 
     def _save_tasks(self):
         try:
@@ -244,7 +246,11 @@ class ToDoApp(ctk.CTk):
             if getattr(t, "course", None) and str(t.course).strip()
         }
         values = sorted(courses, key=lambda s: (not s.isdigit(), s))  # numbers first, then alpha
-        self.class_combo["values"] = values
+
+        if not values:
+            values = [""]
+
+        self.class_combo.configure(values= values)
 
     # ---------- Zoom link persistence ----------
 
